@@ -1,0 +1,1045 @@
+# -*- coding: utf-8 -*-
+"""headline-filter-local.py
+
+Standalone / local-filesystem version of the original Colab notebook.
+All Google Colab and Google Drive dependencies have been removed:
+  - No `drive.mount()` — all reads/writes go to local paths.
+  - No `google.colab.userdata` — API keys/tokens come from environment
+    variables (set them in your shell, a .env file, or export before running).
+  - `kagglehub` still caches its download locally on disk (it never used
+    Drive), but you can also point CONFIG["local_csv_path"] at a CSV you
+    already have on disk to skip the download entirely.
+"""
+
+import os
+
+from dotenv import load_dotenv
+load_dotenv()
+
+DEBUG = True
+
+CONFIG = {
+    "chosen_prob_threshold": 0.7,
+    "model_id": "Meta-Llama/Llama-3.1-8B-Instruct",
+    "cluster_k": 50,
+    "use_hdbscan": False,
+    "embedder": "BAAI/bge-large-en-v1.5",
+    "reduced_embeddings_dim": 64,
+    "hdbscan_min_cluster_size": 150,
+    "use_bfloat16": False,
+    "use_4bit": True,
+    "use_gradient_checkpointing": True,
+    # Local directory (relative or absolute) where all run outputs
+    # (SFT/DPO checkpoints, csvs, etc.) will be written.
+    "output_dir": os.path.join(os.getcwd(), "headline-train-6-27-26"),
+    # Local directory used to cache/download the source dataset.
+    "data_dir": os.path.join(os.getcwd(), "data"),
+    # If you already have the CSV on disk, set this and the kagglehub
+    # download step will be skipped entirely.
+    "local_csv_path": None,  # e.g. "./data/clean-upworthy-archive.csv"
+}
+
+os.makedirs(CONFIG["output_dir"], exist_ok=True)
+os.makedirs(CONFIG["data_dir"], exist_ok=True)
+
+# Model training parameters
+NUM_TRAIN_EPOCHS = 2
+PER_DEVICE_TRAIN_BATCH_SIZE = 2
+GRADIENT_ACCUMULATION_STEPS = 8
+WARMUP_RATIO = 0.1
+
+if DEBUG:
+    import torch
+    print(torch.cuda.is_available())
+    if torch.cuda.is_available():
+        print(torch.cuda.get_device_name(0))
+
+import kagglehub
+import pandas as pd
+
+# ── Load dataset (local CSV override, else kagglehub download) ─────────────
+
+csv_file_name = "clean-upworthy-archive.csv"
+
+if CONFIG.get("local_csv_path"):
+    full_csv_path = CONFIG["local_csv_path"]
+    print(f"Using local CSV override: {full_csv_path}")
+else:
+    # kagglehub downloads/caches to a local directory (e.g. ~/.cache/kagglehub)
+    # regardless of environment — this was never Drive-backed, so it's kept as is.
+    path = kagglehub.dataset_download("thomassshaw/the-upworthy-research-archive")
+    full_csv_path = os.path.join(path, csv_file_name)
+    print(f"Dataset downloaded to directory: {path}")
+    print(f"Attempting to load file: {full_csv_path}")
+
+# Load the CSV file into a pandas DataFrame
+try:
+    df = pd.read_csv(full_csv_path)
+    df_raw = df.copy()
+    print("Dataset loaded successfully!")
+
+    if DEBUG:
+        print("First 5 rows of the dataset:")
+        print(df.head())
+        print(f"{len(df)} rows")
+except FileNotFoundError:
+    print(f"Error: The file '{full_csv_path}' was not found.")
+    if not CONFIG.get("local_csv_path"):
+        print("Listing contents of the downloaded directory to help identify the correct file:")
+        print(os.listdir(path))
+except Exception as e:
+    print(f"An error occurred while loading the dataset: {e}")
+
+from sklearn.metrics import silhouette_score
+from sklearn.metrics.pairwise import euclidean_distances
+import numpy as np
+import pandas as pd
+import anthropic
+import concurrent.futures
+
+# ── Anthropic client + labelling ─────────────────────────────────────────────
+
+# Set this in your shell before running, e.g.:
+#   export ANTHROPIC_API_KEY="sk-ant-..."
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+if not ANTHROPIC_API_KEY:
+    raise RuntimeError(
+        "ANTHROPIC_API_KEY is not set. Export it in your shell "
+        "(export ANTHROPIC_API_KEY=...) before running this script."
+    )
+client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+def get_label(example_headlines, timeout=60):
+    """
+    Generates a concise, descriptive category or label for a given set of headlines
+    using the Claude API with a timeout.
+    """
+    prompt_text = (
+        "Given the following headlines, identify a concise, descriptive category or label that best represents their common theme.\n"
+        "Headlines:\n" +
+        "\n".join([f"- {h}" for h in example_headlines]) +
+        "\n\nRespond with only the category label, nothing else."
+    )
+
+    def _generate_content():
+        return client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=50,
+            messages=[{"role": "user", "content": prompt_text}]
+        )
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_generate_content)
+            response = future.result(timeout=timeout)
+
+        label = response.content[0].text.strip()
+        label = label.split('\n')[0].strip()
+        return label
+    except concurrent.futures.TimeoutError:
+        print(f"Warning: Claude API call timed out after {timeout} seconds for a cluster.")
+        return "N/A"
+    except Exception as e:
+        print(f"Error generating label with Claude: {e}")
+        return "N/A"
+
+def label_clusters(headline_df, n_clusters):
+    """Sample headlines from each cluster and generate LLM labels for all of them."""
+    llm_cluster_names = {}
+    for c in range(n_clusters):
+        cluster_mask = headline_df["cluster"] == c
+        unique_headlines_in_cluster = headline_df[cluster_mask]["headline"].drop_duplicates()
+        sample_headlines = unique_headlines_in_cluster.sample(
+            min(10, len(unique_headlines_in_cluster)),
+            random_state=42
+        ).tolist()
+        print(f"\n=== Cluster {c} ===")
+        for h in sample_headlines:
+            print(f"  {h}")
+
+        label = get_label(sample_headlines)
+        llm_cluster_names[c] = label
+
+    print("\n\n=== Final Generated Cluster Names ===")
+    for cluster_id, name in llm_cluster_names.items():
+        print(f"Cluster {cluster_id}: {name}")
+
+    return llm_cluster_names
+
+K_CLUSTER_MAP_0_7 = {
+    0: "Environmental and Sustainability Solutions",
+    1: "Anti-Bullying Advocacy and Awareness",
+    2: "Health Innovation and Access",
+    3: "Political/Social Commentary Through Entertainment",
+    4: "Inspirational Education Stories",
+    5: "Economic Inequality and Social Issues",
+    6: "Well-being and Life Satisfaction",
+    7: "Satirical/Ironic Commentary on Social Issues",
+    8: "Human Empowerment Stories",
+    9: "Heartwarming/Inspirational Human Interest Stories",
+    10: "Music and Poetry Commentary",
+    11: "Gender-Based Violence and Discrimination",
+    12: "Child Health and Safety",
+    13: "Food Safety and Industry Practices",
+    14: "Human impact and transformation stories",
+    15: "Sports Ethics and Social Responsibility",
+    16: "Entertainment Industry Diversity and Representation Issues",
+    17: "Children and Youth Wisdom/Inspiration",
+    18: "Human Interest Stories",
+    19: "Clickbait Video Headlines",
+    20: "Digital Privacy and Internet Culture",
+    21: "Clickbait Headlines",
+    22: "Investigative Journalism on Controversial Issues",
+    23: "Climate Change Awareness and Solutions",
+    24: "Science Communicators and Space Exploration",
+    25: "Criminal Justice and Social Inequality",
+    26: "Economic Inequality and Worker Compensation",
+    27: "Political Activism and Social Justice",
+    28: "Women's Rights and Gender Equality Issues",
+    29: "Clickbait",
+    30: "Gender Stereotypes and Girls' Empowerment in Media/Products",
+    31: "Mental Health Awareness",
+    32: "Gender Equality and Feminism",
+    33: "Family Relationships and Emotional Moments",
+    34: "Environmental Issues and Conservation",
+    35: "Positive LGBT+ Progress and Acceptance",
+    36: "Police Brutality and Social Justice",
+    37: "Visual Storytelling for Social Change",
+    38: "Human Interest Stories / Personal Narratives",
+    39: "Global Health and Disease Prevention",
+    40: "Racial Discrimination Overcome",
+    41: "Inspirational human interest stories",
+    42: "Higher Education and Socioeconomic Inequality",
+    43: "Corporate Behavior and Business Ethics",
+    44: "Listicle/Clickbait Self-Help",
+    45: "Animal Welfare and Ethics",
+    46: "Clickbait/Sensationalist Headlines",
+    47: "Inspirational and Uplifting Stories",
+    48: "Social Justice and Racial Equity",
+    49: "LGBTQ+ Employment Discrimination and State Legal Protections"
+}
+
+def run_clustering(threshold: float):
+    """
+    Filter the raw DataFrame by `threshold`, embed all headlines, cluster them,
+    label the clusters, and attach cluster columns to the filtered DataFrame.
+
+    Parameters
+    ----------
+    threshold : float
+        The prob_a_gte_b threshold to use when filtering controversial pairs
+        (e.g. 0.7 or 0.8).  Must match a key in K_CLUSTER_MAP_* if you want
+        to use the pre-computed names instead of calling the LLM labeller.
+
+    Returns
+    -------
+    df             : filtered DataFrame with cluster_a / cluster_b / topic_cluster / topic_name
+    cluster_labels : numpy array of cluster ids for all_headlines
+    cluster_names  : dict {cluster_id → name}
+    unique_headlines  : list of unique headlines used for embedding
+    embeddings_original : normalized embeddings before UMAP reduction
+    """
+
+    import numpy as np
+    import pandas as pd
+    from sentence_transformers import SentenceTransformer
+    from sklearn.metrics import silhouette_score
+
+    # 1. Filter
+    df = df_raw.copy()
+    df = df[
+        (df["prob_a_gte_b"] <= 1 - threshold) |
+        (df["prob_a_gte_b"] >= threshold)
+    ]
+    print(f"[threshold={threshold}] {len(df)} pairs retained")
+
+
+    # 2. Embed
+    embedder = SentenceTransformer(CONFIG["embedder"])
+
+    all_headlines = list(df["headline_a"]) + list(df["headline_b"])
+    unique_headlines = list(dict.fromkeys(all_headlines)) # ordered dedup
+    embeddings_original = embedder.encode(
+        unique_headlines,
+        batch_size=256,
+        show_progress_bar=True,
+        normalize_embeddings=True,
+    )
+
+    print(len(unique_headlines))
+
+    # 3. Optionally reduce with UMAP
+    if CONFIG.get("reduced_embeddings_dim"):
+        print(f"Reducing embeddings to {CONFIG['reduced_embeddings_dim']} dims")
+        import umap
+        reducer = umap.UMAP(
+            n_components=CONFIG["reduced_embeddings_dim"],
+            metric="cosine",
+            random_state=42,
+        )
+        embeddings = reducer.fit_transform(embeddings_original)
+        print(f"Reduced embeddings")
+    else:
+        embeddings = embeddings_original
+
+    # 4. Cluster
+    if CONFIG.get("use_hdbscan", False):
+        import hdbscan
+        from sklearn.metrics.pairwise import euclidean_distances
+
+        best_mcs = CONFIG.get("hdbscan_min_cluster_size")
+        if best_mcs is None:
+            best_score, best_mcs = -1, None
+            for mcs in [30, 50, 75, 100, 150]:
+                clusterer = hdbscan.HDBSCAN(
+                    min_cluster_size=mcs, min_samples=1,
+                    metric="euclidean", cluster_selection_method="leaf",
+                    cluster_selection_epsilon=0.3,
+                )
+                labels = clusterer.fit_predict(embeddings)
+                n_cl = len(set(labels)) - (1 if -1 in labels else 0)
+                mask = labels != -1
+                score = silhouette_score(
+                    embeddings[mask], labels[mask],
+                    sample_size=5000, random_state=42,
+                ) if n_cl >= 2 and mask.sum() > 1 else -1
+                print(f"  min_cluster_size={mcs}: clusters={n_cl}, silhouette={score:.3f}")
+                if score > best_score:
+                    best_score, best_mcs = score, mcs
+            print(f"Best: min_cluster_size={best_mcs} (silhouette={best_score:.3f})")
+
+        clusterer = hdbscan.HDBSCAN(
+            min_cluster_size=best_mcs,
+            min_samples=CONFIG.get("hdbscan_min_samples", 3),
+            metric="euclidean",
+            cluster_selection_method="leaf",
+            cluster_selection_epsilon=0.3,
+        )
+        cluster_labels = clusterer.fit_predict(embeddings)
+        n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+        n_noise = (cluster_labels == -1).sum()
+        print(f"Clusters: {n_clusters}, Noise: {n_noise} ({n_noise/len(cluster_labels)*100:.1f}%)")
+
+        noise_mask = cluster_labels == -1
+        if noise_mask.any():
+            centroids = np.array([
+                embeddings[cluster_labels == i].mean(axis=0)
+                for i in range(n_clusters)
+            ])
+            from sklearn.metrics.pairwise import euclidean_distances
+            dists = euclidean_distances(embeddings[noise_mask], centroids)
+            cluster_labels[noise_mask] = dists.argmin(axis=1)
+
+    else:
+        from sklearn.cluster import KMeans
+
+        k = CONFIG.get("cluster_k")
+        if k is None:
+            for k_try in [20, 30, 40, 50, 75, 100]:
+                km_try = KMeans(n_clusters=k_try, random_state=42, n_init=10)
+                labels_try = km_try.fit_predict(embeddings)
+                sil = silhouette_score(embeddings, labels_try, sample_size=5000, random_state=42)
+                print(f"  k={k_try}: inertia={km_try.inertia_:.0f}, silhouette={sil:.3f}")
+            raise ValueError("Set CONFIG['cluster_k'] after inspecting the scores above.")
+
+        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+        cluster_labels = km.fit_predict(embeddings)
+        n_clusters = k
+
+    # 5. Label clusters
+    # Use pre-computed maps if available, otherwise call the LLM labeller.
+    if CONFIG.get("use_hdbscan", False):
+        cluster_names = HDBSCAN_CLUSTER_MAP_0_7 if threshold == 0.7 else None
+    else:
+        if threshold == 0.7:
+            cluster_names = K_CLUSTER_MAP_0_7
+        elif threshold == 0.8:
+            cluster_names = K_CLUSTER_MAP_0_8
+        else:
+            cluster_names = None
+
+    if not cluster_names:
+        headline_df_tmp = pd.DataFrame({"headline": unique_headlines, "cluster": cluster_labels})
+        cluster_names = label_clusters(headline_df_tmp, n_clusters)
+
+    # 6. Attach cluster columns to df
+    df = df.copy()
+    headline_to_cluster = dict(zip(unique_headlines, cluster_labels))
+    df["cluster_a"] = df["headline_a"].map(headline_to_cluster)
+    df["cluster_b"] = df["headline_b"].map(headline_to_cluster)
+
+    df["topic_cluster"] = df.apply(
+        lambda row: row["cluster_a"] if row["prob_a_gte_b"] >= 0.5 else row["cluster_b"],
+        axis=1,
+    )
+    df["topic_name"] = df["topic_cluster"].map(cluster_names)
+
+    print(f"[threshold={threshold}] Clustering complete. {n_clusters} clusters.")
+    return df, cluster_labels, cluster_names, unique_headlines, embeddings_original
+
+# Analyze the data, needed for a table in the write-up
+
+def analyze_df_headlines(df, embeddings_all, unique_headlines, cluster_labels_all):
+  # embeddings_all: embeddings for unique_headlines (can be original or UMAP reduced)
+  # unique_headlines: list of all unique headlines
+  # cluster_labels_all: cluster labels for unique_headlines
+
+  count = (df['cluster_a'] != df['cluster_b']).sum()
+  print(f"Rows where cluster_a != cluster_b: {count}")
+
+  from sklearn.metrics.pairwise import cosine_similarity
+  import numpy as np
+
+  # Create a mapping from headline to its embedding and cluster label
+  headline_to_embedding = {h: embeddings_all[i] for i, h in enumerate(unique_headlines)}
+  headline_to_idx = {h: i for i, h in enumerate(unique_headlines)}
+
+  sims = []
+  concordant_sims = []
+  discordant_sims = []
+
+  for index, row in df.iterrows():
+      headline_a = row['headline_a']
+      headline_b = row['headline_b']
+
+      emb_a = headline_to_embedding[headline_a]
+      emb_b = headline_to_embedding[headline_b]
+      sim = float(np.dot(emb_a, emb_b)) # cosine sim (already normalized if embeddings_all are normalized)
+
+      cluster_a = row['cluster_a'] # Use the cluster labels from the dataframe
+      cluster_b = row['cluster_b'] # Use the cluster labels from the dataframe
+
+      sims.append(sim)
+      if cluster_a == cluster_b:
+          concordant_sims.append(sim)
+      else:
+          discordant_sims.append(sim)
+
+  print(f"Concordant pairs:  n={len(concordant_sims)}, mean={np.mean(concordant_sims):.4f}, std={np.std(concordant_sims):.4f}")
+  print(f"Discordant pairs:  n={len(discordant_sims)}, mean={np.mean(discordant_sims):.4f}, std={np.std(discordant_sims):.4f}")
+  print(f"Overall:           n={len(sims)},             mean={np.mean(sims):.4f}, std={np.std(sims):.4f}")
+
+  # For each headline_a, what rank is its paired headline_b among all embeddings?
+  # If rank is consistently low (e.g. top 1-5%), the pair IS semantically close,
+  # but so is everything else.
+
+  from sklearn.metrics.pairwise import cosine_similarity as cos_sim_matrix
+
+  sample_n = 500  # expensive, sample if needed
+  rng = np.random.default_rng(42)
+
+  concordant_ranks = []
+  discordant_ranks = []
+
+  # Sample indices from the DataFrame for headline_a
+  sampled_df_indices = rng.choice(df.index, size=sample_n, replace=True)
+
+  for df_idx in sampled_df_indices:
+      row = df.loc[df_idx]
+      headline_a = row['headline_a']
+      headline_b = row['headline_b']
+
+      query_embedding = headline_to_embedding[headline_a].reshape(1, -1) # Reshape for cos_sim_matrix
+      target_embedding_idx_in_all = headline_to_idx[headline_b]
+
+      # Calculate cosine similarity of query_embedding against all unique embeddings
+      sims_row = cos_sim_matrix(query_embedding, embeddings_all)[0]
+
+      # Rank of target_embedding_idx_in_all among all similarities
+      # (sims_row > sims_row[target_embedding_idx_in_all]).sum() counts how many embeddings are more similar
+      rank = (sims_row > sims_row[target_embedding_idx_in_all]).sum() / len(unique_headlines)
+
+      cluster_a = row['cluster_a']
+      cluster_b = row['cluster_b']
+
+      if cluster_a == cluster_b:
+          concordant_ranks.append(rank)
+      else:
+          discordant_ranks.append(rank)
+
+  print(f"Concordant  median rank: {np.median(concordant_ranks):.4f}")
+  print(f"Discordant  median rank: {np.median(discordant_ranks):.4f}")
+  # e.g. 0.03 means the pair is in the top 3% — clearly close,
+  # but so is 3% of a 50k corpus = ~1500 other headlines
+
+def build_dataset(df, output_path=None, train_size=0.85, validation_size=0.05, test_size=0.1):
+    import json
+    from datasets import load_dataset, DatasetDict
+
+    if train_size + validation_size + test_size != 1:
+        raise ValueError("train_size + validation_size + test_size must equal 1")
+
+    # Default the jsonl output into CONFIG["output_dir"] instead of the cwd,
+    # unless the caller passed an explicit path.
+    if output_path is None:
+        output_path = os.path.join(CONFIG["output_dir"], "headlines_dpo.jsonl")
+    elif not os.path.isabs(output_path):
+        output_path = os.path.join(CONFIG["output_dir"], output_path)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    records = []
+    for _, row in df.iterrows():
+        if row["prob_a_gte_b"] > CONFIG["chosen_prob_threshold"]:
+            chosen, rejected = row["headline_a"], row["headline_b"]
+        else:
+            chosen, rejected = row["headline_b"], row["headline_a"]
+
+        records.append({
+            "prompt": f"Write an engaging headline about {row['topic_name']}.",
+            "chosen": chosen,
+            "rejected": rejected,
+            "topic_name": row["topic_name"],
+        })
+
+    with open(output_path, "w") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+    print(f"Saved {len(records)} rows to {output_path}")
+
+    dataset = load_dataset("json", data_files=output_path)["train"]
+    dataset = dataset.train_test_split(test_size=test_size, seed=42)
+    train_val = dataset["train"].train_test_split(test_size=validation_size / (train_size + validation_size), seed=42)
+    dataset = DatasetDict({
+        "train": train_val["train"],
+        "validate": train_val["test"],
+        "test": dataset["test"],
+    })
+
+    print(f"{len(dataset['train'])} Training, {len(dataset['validate'])} Validate, {len(dataset['test'])} Test")
+
+    if DEBUG:
+        for i in range(3):
+            row = dataset["train"][i]
+            print(f"--- Record {i+1} ---")
+            print(f"Prompt:   {row['prompt']}")
+            print(f"Chosen:   {row['chosen']}")
+            print(f"Rejected: {row['rejected']}\n")
+        print(f"{len(dataset['train'])} Training, {len(dataset['validate'])} Validate, {len(dataset['test'])} Test")
+
+    return dataset
+
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+import torch
+import os
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, PeftModel
+
+# Set this in your shell before running, e.g.:
+#   export HF_TOKEN="hf_..."
+token = os.environ.get("HF_TOKEN")
+
+def load_base_model_backbone():
+    """Loads the quantized base model, without any LoRA adapter."""
+    dtype = torch.bfloat16 if CONFIG.get("use_bfloat16") else torch.float32
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=dtype,
+        bnb_4bit_use_double_quant=True,
+    ) if CONFIG.get("use_4bit") else None
+
+    model = AutoModelForCausalLM.from_pretrained(
+        CONFIG["model_id"],
+        quantization_config=bnb_config,
+        device_map="auto",
+        token=token,
+        torch_dtype=dtype
+    )
+    model.config.use_cache = False
+
+    # If using quantization, prepare for training without manual casting. Let PEFT handle dtypes
+    if CONFIG.get("use_4bit"):
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=False)
+    # elif CONFIG.get("use_gradient_checkpointing"):
+    #     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
+    return model
+
+def load_model():
+    lora_config = LoraConfig(
+        r=16, lora_alpha=32,
+        target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+        lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
+    )
+    return get_peft_model(load_base_model_backbone(), lora_config)
+
+def load_saved_model(path):
+    return PeftModel.from_pretrained(load_base_model_backbone(), path, is_trainable=True)
+
+def load_tokenizer():
+  tokenizer = AutoTokenizer.from_pretrained(CONFIG["model_id"], token=token)
+  tokenizer.pad_token = tokenizer.eos_token
+  tokenizer.padding_side = "left"
+
+  return tokenizer
+
+from tqdm import tqdm
+
+def log_prob(model, tokenizer, prompt, completion):
+    # TODO: I realized I didn't need to do this twice in a row, see if it really was hurting evaluation
+    # messages = [{"role": "user", "content": prompt}]
+    # prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_special_tokens=True)
+
+    prompt_ids = tokenizer(prompt, return_tensors="pt").input_ids
+    full_ids = tokenizer(prompt + completion, return_tensors="pt").input_ids
+
+    prompt_len = prompt_ids.shape[1]
+
+    labels = full_ids.clone()
+    labels[0, :prompt_len] = -100  # mask prompt tokens from loss
+
+    with torch.no_grad():
+        output = model(input_ids=full_ids.to(model.device), labels=labels.to(model.device))
+
+    return -output.loss.item()
+
+def evaluate_model_accuracy(model, tokenizer, dataset):
+  correct = 0
+  total = 0
+  margin_sum = 0
+
+  model.eval()
+
+  for row in tqdm(dataset["test"]):
+      lp_chosen = log_prob(model, tokenizer, row["prompt"], row["chosen"])
+      lp_rejected = log_prob(model, tokenizer, row["prompt"], row["rejected"])
+
+      margin = lp_chosen - lp_rejected
+      margin_sum += margin
+      if margin > 0:
+          correct += 1
+      total += 1
+
+  print(f"Pairwise accuracy: {correct / total:.3f}  ({correct}/{total})")
+  print(f"Mean log-prob margin: {margin_sum / total:.4f}")
+
+def clear_model(model, trainer = None):
+  try:
+    import gc
+
+    if trainer: del trainer
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
+  except:
+    print("GC collection failed")
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.feature_extraction.text import TfidfVectorizer
+import warnings
+warnings.filterwarnings("ignore")
+
+# ── helpers ──────────────────────────────────────────────────
+def pairwise_stats(model, tokenizer, split, desc="eval"):
+    """
+    Iterate over a dataset split and return (accuracy, mean_margin, per-row records).
+    `split` must have columns: prompt, chosen, rejected.
+    Each prompt is expected to already have the chat template applied.
+    """
+    rows = []
+    model.eval()
+    for row in tqdm(split, desc=desc):
+        # strip chat template wrapper to get the raw topic string for log_prob
+        prompt_raw = row["prompt"]
+        lp_c = log_prob(model, tokenizer, prompt_raw, row["chosen"])
+        lp_r = log_prob(model, tokenizer, prompt_raw, row["rejected"])
+        margin = lp_c - lp_r
+        rows.append({
+            "prompt":   prompt_raw,
+            "chosen":   row["chosen"],
+            "rejected": row["rejected"],
+            "lp_chosen":  lp_c,
+            "lp_rejected": lp_r,
+            "margin":   margin,
+            "correct":  int(margin > 0),
+        })
+    records = pd.DataFrame(rows)
+    accuracy = records["correct"].mean()
+    mean_margin = records["margin"].mean()
+    return accuracy, mean_margin, records
+
+
+
+# ── TABLE 2 — Main Results ────────────────────────────────────
+
+def build_table2_row(label, model, tokenizer, test_split):
+    """Evaluate one model and return a result dict for Table 2."""
+    acc, margin, _ = pairwise_stats(model, tokenizer, test_split, desc=label)
+    return {
+        "Model":              label,
+        "Preference Accuracy": round(acc, 4),
+        "Mean Reward Margin":  round(margin, 4),
+    }
+
+
+def build_table2(rows):
+    """
+    Call build_table2_row() once per model variant, collect the dicts in a list,
+    then call this to save.
+
+    Example usage:
+        results = []
+        results.append(build_table2_row("Llama 1B – Base",          base_model,   tokenizer, dataset["test"]))
+        results.append(build_table2_row("Llama 1B – DPO (t=0.7)",   dpo_model_07, tokenizer, dataset["test"]))
+        results.append(build_table2_row("Llama 1B – DPO (t=0.9)",   dpo_model_09, tokenizer, dataset["test"]))
+        results.append(build_table2_row("Llama 8B – DPO (t=0.7)",   dpo_8b,       tokenizer, dataset["test"]))
+        t2 = build_table2(results)
+    """
+    t2 = pd.DataFrame(rows)
+    out_dir = os.path.join(CONFIG["output_dir"], "llama_model_stats")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "table2_main_results.csv")
+    t2.to_csv(out_path, index=False)
+    print(f"✓ {out_path}")
+    return t2
+
+def evaluate_by_category(model, tokenizer, test_split, model_label="model"):
+    """
+    Returns a DataFrame with pairwise accuracy and mean log-prob margin
+    broken down by topic_name category.
+    Also saves to a CSV.
+    """
+    import pandas as pd
+    from tqdm import tqdm
+
+    rows = []
+    model.eval()
+
+    for row in tqdm(test_split, desc=f"eval [{model_label}]"):
+        lp_c = log_prob(model, tokenizer, row["prompt"], row["chosen"])
+        lp_r = log_prob(model, tokenizer, row["prompt"], row["rejected"])
+        margin = lp_c - lp_r
+        rows.append({
+            "topic":      row["topic_name"],
+            "lp_chosen":  lp_c,
+            "lp_rejected": lp_r,
+            "margin":     margin,
+            "correct":    int(margin > 0),
+        })
+
+    records = pd.DataFrame(rows)
+
+    summary = (
+        records.groupby("topic")
+        .agg(
+            n_pairs        = ("correct",  "count"),
+            pairwise_acc   = ("correct",  "mean"),
+            mean_lp_chosen = ("lp_chosen", "mean"),
+            mean_lp_rejected = ("lp_rejected", "mean"),
+            mean_margin    = ("margin",   "mean"),
+        )
+        .reset_index()
+        .sort_values("pairwise_acc", ascending=False)
+    )
+
+    for col in ["pairwise_acc", "mean_lp_chosen", "mean_lp_rejected", "mean_margin"]:
+        summary[col] = summary[col].round(4)
+
+    out_path = os.path.join(CONFIG["output_dir"], f"category_eval_{model_label.replace(' ', '_')}.csv")
+    summary.to_csv(out_path, index=False)
+    print(f"✓ Saved to {out_path}")
+    print(summary.to_string(index=False))
+    return summary
+
+def evaluate_model(model, label: str, dataset, tokenizer):
+  if DEBUG:
+    print(next(model.parameters()).device)
+    print(model.dtype)
+    model.print_trainable_parameters()
+
+  evaluate_model_accuracy(model, tokenizer, dataset)
+  cat_stats = evaluate_by_category(model, tokenizer, dataset["test"], model_label=label)
+  t2_row = build_table2_row(label, model, tokenizer, dataset["test"])
+
+  return cat_stats, t2_row
+
+# Apply chat template to dataset if not already applied
+def apply_chat_template_to_prompt(example, tokenizer):
+  if "<|begin_of_text|>" in example["prompt"]:
+      return example
+  messages = [{"role": "user", "content": example["prompt"]}]
+  example["prompt"] = tokenizer.apply_chat_template(messages, tokenize=False, add_special_tokens=True)
+  return example
+
+from trl import SFTTrainer, SFTConfig
+import os
+
+def run_sft(dataset, tokenizer, output_dir: str, path: str = None, resume_from_checkpoint=False):
+    """
+    Fine-tune (SFT) a model on the chosen completions in `dataset`.
+
+    Parameters
+    ----------
+    dataset  : HuggingFace DatasetDict with "train" and "validate" splits.
+    tokenizer: The tokenizer (already loaded).
+    output_dir : Local directory to save checkpoints to.
+    path     : Optional path to a saved LoRA adapter.  If provided, loads
+               that checkpoint instead of initialising LoRA from scratch.
+
+    Returns
+    -------
+    sft_model : Trained PEFT model (still on GPU).
+    trainer   : SFTTrainer instance (call clear_model() when done with it).
+    """
+
+    def apply_chat_template(example):
+        return apply_chat_template_to_prompt(example, tokenizer)
+    def format_for_sft(example):
+        return {"text": example["prompt"] + example["chosen"]}
+
+    sft_dataset = (
+        dataset["train"]
+        .map(apply_chat_template)
+        .map(format_for_sft, remove_columns=dataset["train"].column_names)
+    )
+    sft_validate = (
+        dataset["validate"]
+        .map(apply_chat_template)
+        .map(format_for_sft, remove_columns=dataset["validate"].column_names)
+    )
+
+    # -- Load model ----------------------------------------------------------
+    if path:
+        print(f"[SFT] Loading saved model from {path}")
+        sft_model = load_saved_model(path)
+    else:
+        print("[SFT] Initialising fresh LoRA model")
+        sft_model = load_model()
+    sft_model = sft_model#.to("cuda")
+
+    # -- Train -----------------------------------------------------------------
+    sft_args = SFTConfig(
+        output_dir=output_dir,  # local directory — checkpoints go straight to disk
+        num_train_epochs=NUM_TRAIN_EPOCHS,
+        gradient_checkpointing=CONFIG.get("use_gradient_checkpointing", False),
+        per_device_train_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+        learning_rate=5e-5,
+        max_length=512,
+        lr_scheduler_type="cosine",
+        warmup_ratio=WARMUP_RATIO,
+        logging_steps=10,
+        save_strategy="steps",
+        save_steps=100,
+        save_total_limit=3,
+        bf16=CONFIG.get("use_bfloat16", False),
+        fp16=False,
+        report_to="none",
+        dataset_text_field="text",
+    )
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    sft_trainer = SFTTrainer(
+        model=sft_model,
+        args=sft_args,
+        train_dataset=sft_dataset,
+        eval_dataset=sft_validate,
+        processing_class=tokenizer,
+    )
+
+    print(f"[SFT] Starting training. Checkpoints will be saved to: {output_dir}")
+    sft_trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+
+    sft_trainer.save_model(output_dir)
+    tokenizer.save_pretrained(output_dir)
+
+    # --- Add check after saving ---
+    adapter_config_path = os.path.join(output_dir, "adapter_config.json")
+    if not os.path.exists(adapter_config_path):
+        raise RuntimeError(f"CRITICAL ERROR: SFT model failed to save 'adapter_config.json' to {output_dir}. This will cause loading errors later.")
+    print(f"SFT model and tokenizer successfully saved to {output_dir}")
+
+    return sft_model, sft_trainer
+
+from trl import DPOTrainer, DPOConfig
+import os
+
+def run_dpo(dataset, tokenizer, output_dir: str, model_path: str = None, resume_from_checkpoint=False):
+  """
+  Run DPO on top of a (usually SFT-initialised) model.
+
+  Parameters
+  ----------
+  dataset  : HuggingFace DatasetDict with "train" and "validate" splits.
+  tokenizer: The tokenizer (already loaded).
+  output_dir : Local directory to save checkpoints to.
+  model_path : Optional path to a saved LoRA adapter to start from.
+              If None, initialises a fresh LoRA model (not recommended —
+              you almost always want to pass the SFT checkpoint here).
+
+  Returns
+  -------
+  dpo_model : Trained PEFT model (still on GPU).
+  trainer   : DPOTrainer instance (call clear_model() when done with it).
+  """
+  num_training_steps = (
+    len(dataset["train"])
+    / PER_DEVICE_TRAIN_BATCH_SIZE
+    / GRADIENT_ACCUMULATION_STEPS
+  ) * NUM_TRAIN_EPOCHS
+  warmup_steps = int(num_training_steps * WARMUP_RATIO)
+
+  # -- Load model ----------------------------------------------------------
+  if model_path:
+    print(f"[DPO] Attempting to load saved model from {model_path}")
+    # --- Add check before loading ---
+    adapter_config_path = os.path.join(model_path, "adapter_config.json")
+    if not os.path.exists(adapter_config_path):
+        raise RuntimeError(f"CRITICAL ERROR: 'adapter_config.json' not found in {model_path}. This means the SFT model was not saved correctly or the path is invalid, causing PeftModel.from_pretrained to fail.")
+    dpo_model = load_saved_model(model_path)
+  else:
+    print("[DPO] WARNING: No path provided. Initializing fresh LoRA model. "
+        "Consider passing the SFT checkpoint path instead.")
+    dpo_model = load_model()
+
+  # -- Apply chat template (needed when the SFT model was trained with it) --
+  def apply_chat_template(example):
+    return apply_chat_template_to_prompt(example, tokenizer)
+
+  if not CONFIG.get("use_4bit"):
+    dpo_train    = dataset["train"].map(apply_chat_template)
+    dpo_validate = dataset["validate"].map(apply_chat_template)
+  else:
+    dpo_train    = dataset["train"]
+    dpo_validate = dataset["validate"]
+
+  # Train
+  training_args = DPOConfig(
+    output_dir=output_dir, # local directory — routed straight to disk
+    num_train_epochs=NUM_TRAIN_EPOCHS,
+    gradient_checkpointing=CONFIG.get("use_gradient_checkpointing", False),
+    per_device_train_batch_size=PER_DEVICE_TRAIN_BATCH_SIZE,
+    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+    learning_rate=5e-5,
+    beta=0.1,
+    max_length=512,
+    warmup_steps=warmup_steps,
+    lr_scheduler_type="cosine",
+    logging_steps=10,
+    eval_steps=100,
+    save_strategy="steps",
+    save_steps=100,
+    save_total_limit=3,
+    bf16=CONFIG.get("use_bfloat16", False),
+    fp16=False,
+    report_to="none",
+    remove_unused_columns=False,
+  )
+
+  os.makedirs(output_dir, exist_ok=True)
+
+  dpo_trainer = DPOTrainer(
+    model=dpo_model,
+    args=training_args,
+    train_dataset=dpo_train,
+    eval_dataset=dpo_validate,
+    processing_class=tokenizer,
+  )
+
+  print(f"[DPO] Starting training. Checkpoints will be saved to: {output_dir}")
+  dpo_trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+
+  # Save the trained model and tokenizer locally
+  dpo_trainer.save_model(output_dir)
+  tokenizer.save_pretrained(output_dir)
+  print(f"Model and tokenizer saved to {output_dir}")
+
+  return dpo_model, dpo_trainer
+
+df, cluster_labels, cluster_names, _, _ = run_clustering(0.7)
+dataset = build_dataset(df, output_path="headlines_dpo_0_7.jsonl")
+tokenizer = load_tokenizer()
+cat_stats_base, t2_base_row = evaluate_model(load_model(), f"Llama3 8B - Base", dataset, tokenizer)
+
+tokenizer = load_tokenizer()
+cat_stats_base, t2_base_row = evaluate_model(load_model(), f"Llama3 8B - Base", dataset, tokenizer)
+
+def run_full_pipeline(threshold: float, model_name: str, skip_sft=False, resume_sft=False, resume_dpo=False):
+    LOCAL_BASE = CONFIG["output_dir"]
+    t = str(threshold).replace(".", "_")  # e.g. "0.7" → "0_7" for safe path names
+    m = model_name.lower().replace(" ", "_")  # e.g. "Llama 8B" → "llama_8B" for safe path names
+
+    SFT_PATH = os.path.join(LOCAL_BASE, f"{m}_sft_{t}")
+    DPO_SCRATCH_PATH = os.path.join(LOCAL_BASE, f"{m}_dpo_scratch_{t}")
+    DPO_SFT_PATH = os.path.join(LOCAL_BASE, f"{m}_sft_dpo_{t}")
+
+    print(f"Paths: \n SFT: {SFT_PATH} \n DPO (Scratch): {DPO_SCRATCH_PATH} \n DPO (SFT Init): {DPO_SFT_PATH}")
+
+    # ================================
+    # 1. SFT Stage
+    # ================================
+    if not skip_sft:
+        sft_model, sft_trainer = run_sft(dataset, tokenizer, SFT_PATH, resume_from_checkpoint=resume_sft)
+        print(f"SFT saved to {SFT_PATH}")
+
+        evaluate_model(sft_model, "Llama 1B - SFT", dataset, tokenizer)
+        try:
+            t2_sft_row = build_table2_row(f"{model_name} - SFT (t={threshold})", sft_model, tokenizer, dataset["test"])
+        except:
+            t2_sft_row = None
+
+        clear_model(sft_model, sft_trainer)
+        del sft_model, sft_trainer
+    else:
+        print(f"[Pipeline] Skipping SFT training, assuming final model is available at {SFT_PATH}")
+        t2_sft_row = None
+
+    # ================================
+    # 2. DPO Stage (on top of SFT)
+    # ================================
+    dpo_sft_model, dpo_sft_trainer = run_dpo(
+        dataset, tokenizer, DPO_SFT_PATH,
+        model_path=SFT_PATH,
+        resume_from_checkpoint=resume_dpo
+    )
+
+    evaluate_model(dpo_sft_model, f"{model_name} - SFT DPO", dataset, tokenizer)
+    print(f"DPO (SFT init) saved to {DPO_SFT_PATH}")
+
+    try:
+      t2_dpo_sft_row = build_table2_row(f"{model_name} - SFT+DPO (t={threshold})", dpo_sft_model, tokenizer, dataset["test"])
+    except:
+      t2_dpo_sft_row = None
+
+    clear_model(dpo_sft_model, dpo_sft_trainer)
+    del dpo_sft_model, dpo_sft_trainer
+
+    try:
+      # Note: Removed t2_dpo_scratch_row as it is commented out in your pipeline.
+      t2 = build_table2([t2_base_row, t2_sft_row, t2_dpo_sft_row])
+      print(t2.to_string(index=False))
+    except:
+      t2 = None
+
+    return {
+        "dataset": dataset,
+        "cluster_labels": cluster_labels,
+        "cluster_names": cluster_names,
+        "cat_stats_base": cat_stats_base,
+        "t2": t2,
+        "paths": {
+            "sft": SFT_PATH,
+            "dpo_scratch": DPO_SCRATCH_PATH,
+            "dpo_sft": DPO_SFT_PATH,
+        },
+        "df": df
+    }
+
+# =========================================================================
+# RESUMING INSTRUCTIONS:
+# =========================================================================
+# Start fresh:
+# results_07 = run_full_pipeline(0.7, "LLama3 8B")
+
+# Resume SFT if training crashed during SFT:
+results_07 = run_full_pipeline(0.7, "LLama3 8B", skip_sft=True)
+
+# Resume DPO if training crashed during DPO (SFT already finished):
+# results_07 = run_full_pipeline(0.7, "Llama3 8B", skip_sft=True, resume_dpo=True)
+
+print(results_07)
+
+final_csv_path = os.path.join(CONFIG["output_dir"], "filtered_dataframe_0.7.csv")
+results_07["df"].to_csv(final_csv_path, index=False)
+print(f"Saved filtered dataframe to {final_csv_path}")
