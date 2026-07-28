@@ -21,6 +21,10 @@ export const metadata: Metadata = {
   title: "Forest Lab · Random Forest Visualizer",
   description:
     "An interactive guided demo that shows how random forests bag data, grow trees, and vote",
+  icons: {
+    icon: "/jclinic.jpg",
+    apple: "/jclinic.jpg",
+  },
 };
 
 export default function RootLayout({
