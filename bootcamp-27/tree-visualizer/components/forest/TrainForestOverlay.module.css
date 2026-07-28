@@ -1,0 +1,200 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 1rem;
+  background: rgba(28, 48, 36, 0.4);
+  backdrop-filter: blur(8px);
+  transform-origin: var(--origin-x, 50%) var(--origin-y, 40%);
+  animation: expandOut 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.surface {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.15rem 1.25rem 1.35rem;
+  border-radius: 1.25rem;
+  background:
+    radial-gradient(ellipse 80% 50% at 15% 0%, rgba(149, 213, 178, 0.4), transparent 55%),
+    radial-gradient(ellipse 55% 40% at 95% 8%, rgba(217, 119, 6, 0.12), transparent 50%),
+    rgba(247, 250, 247, 0.97);
+  border: 1px solid rgba(45, 106, 79, 0.14);
+  box-shadow: 0 24px 60px rgba(28, 48, 36, 0.24);
+  overflow: auto;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-shrink: 0;
+}
+
+.eyebrow {
+  margin: 0 0 0.2rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(1.35rem, 2.5vw, 1.85rem);
+  font-weight: 650;
+  color: var(--color-ink);
+}
+
+.status {
+  margin: 0.45rem 0 0;
+  max-width: 52rem;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  color: var(--color-ink-muted);
+}
+
+.headerActions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  gap: 1.1rem;
+  align-items: start;
+}
+
+.scatterPane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.85rem;
+  border-radius: 1.1rem;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(45, 106, 79, 0.12);
+  animation: floatIn 420ms ease both;
+}
+
+.phasePills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.pill {
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--color-ink-muted);
+  background: rgba(45, 106, 79, 0.06);
+  border: 1px solid transparent;
+  transition:
+    background 200ms ease,
+    color 200ms ease,
+    border-color 200ms ease;
+}
+
+.pillActive {
+  color: var(--color-canopy);
+  background: rgba(149, 213, 178, 0.45);
+  border-color: rgba(45, 106, 79, 0.2);
+}
+
+.treesPane {
+  min-width: 0;
+  min-height: 0;
+}
+
+.treeGrid {
+  display: grid;
+  gap: 0.75rem;
+  align-content: start;
+}
+
+.treeCard {
+  padding: 0.5rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(45, 106, 79, 0.12);
+  background: rgba(255, 255, 255, 0.55);
+  transition:
+    border-color 220ms ease,
+    background 220ms ease,
+    box-shadow 220ms ease,
+    transform 220ms ease;
+  animation: cardIn 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.treeCard:nth-child(1) { animation-delay: 40ms; }
+.treeCard:nth-child(2) { animation-delay: 80ms; }
+.treeCard:nth-child(3) { animation-delay: 120ms; }
+.treeCard:nth-child(4) { animation-delay: 160ms; }
+.treeCard:nth-child(5) { animation-delay: 200ms; }
+.treeCard:nth-child(6) { animation-delay: 240ms; }
+.treeCard:nth-child(7) { animation-delay: 280ms; }
+.treeCard:nth-child(8) { animation-delay: 320ms; }
+.treeCard:nth-child(9) { animation-delay: 360ms; }
+
+.treeCardActive {
+  border-color: rgba(217, 119, 6, 0.55);
+  background: rgba(255, 248, 235, 0.9);
+  box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.18);
+  transform: translateY(-2px);
+}
+
+.treeCardDone {
+  border-color: rgba(45, 106, 79, 0.28);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+@keyframes expandOut {
+  from {
+    transform: scale(0.22);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes floatIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes cardIn {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@media (max-width: 960px) {
+  .body {
+    grid-template-columns: 1fr;
+  }
+}
