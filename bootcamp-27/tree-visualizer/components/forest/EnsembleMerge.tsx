@@ -13,12 +13,18 @@ interface EnsembleMergeProps {
   revealVotes: number;
   /** whether final merge animation is active */
   merging: boolean;
+  /** hide the true label line (e.g. for unknown query points) */
+  hideTrueLabel?: boolean;
+  /** highlight a tree that voted differently from the majority */
+  highlightTreeId?: number | null;
 }
 
 export function EnsembleMerge({
   prediction,
   revealVotes,
   merging,
+  hideTrueLabel = false,
+  highlightTreeId = null,
 }: EnsembleMergeProps) {
   if (!prediction) {
     return (
@@ -45,10 +51,14 @@ export function EnsembleMerge({
         <div className={styles.voters}>
           {trees.map((tp, i) => {
             const visible = i < revealVotes;
+            const isWrong =
+              highlightTreeId != null &&
+              tp.treeId === highlightTreeId &&
+              tp.prediction !== prediction.prediction;
             return (
               <div
                 key={tp.treeId}
-                className={`${styles.voter} ${visible ? styles.visible : ""}`}
+                className={`${styles.voter} ${visible ? styles.visible : ""} ${isWrong ? styles.voterWrong : ""}`}
                 style={
                   {
                     "--delay": `${i * 70}ms`,
@@ -117,12 +127,14 @@ export function EnsembleMerge({
             <span className={styles.finalLabel}>
               {CLASS_LABELS[prediction.prediction]}
             </span>
-            <span className={styles.finalNote}>
-              True label: {CLASS_LABELS[prediction.sample.label]}
-              {prediction.prediction === prediction.sample.label
-                ? " · correct"
-                : " · edge case!"}
-            </span>
+            {!hideTrueLabel ? (
+              <span className={styles.finalNote}>
+                True label: {CLASS_LABELS[prediction.sample.label]}
+                {prediction.prediction === prediction.sample.label
+                  ? " · correct"
+                  : " · edge case!"}
+              </span>
+            ) : null}
           </div>
         </div>
       </div>

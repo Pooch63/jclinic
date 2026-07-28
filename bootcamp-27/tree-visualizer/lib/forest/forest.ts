@@ -97,6 +97,9 @@ function walkTree(
   };
 }
 
+/** Sentinel id for a hand-built tree shown beside the forest. */
+export const USER_TREE_ID = -1;
+
 export function predictTree(
   tree: DecisionTree,
   sample: Sample,
@@ -104,6 +107,20 @@ export function predictTree(
   const result = walkTree(tree.root, sample);
   return {
     treeId: tree.id,
+    prediction: result.prediction,
+    path: result.path,
+    leafVotes: result.leafVotes,
+  };
+}
+
+export function predictFromRoot(
+  root: TreeNode,
+  sample: Sample,
+  treeId: number = USER_TREE_ID,
+): TreePrediction {
+  const result = walkTree(root, sample);
+  return {
+    treeId,
     prediction: result.prediction,
     path: result.path,
     leafVotes: result.leafVotes,

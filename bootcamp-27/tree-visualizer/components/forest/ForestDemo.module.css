@@ -109,10 +109,21 @@
   cursor: not-allowed;
 }
 
+.treePickerBtnUser {
+  min-width: 1.85rem;
+  font-size: 0.58rem;
+  letter-spacing: -0.02em;
+}
+
 .treePickerBtnActive {
   background: linear-gradient(135deg, var(--color-moss), var(--color-canopy));
   border-color: transparent;
   color: white;
+}
+
+.treePickerBtnWrong {
+  border-color: rgba(217, 119, 6, 0.55);
+  box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.2);
 }
 
 .treePickerExpand {
@@ -146,6 +157,15 @@
 .treePickerExpand:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.shellFull {
+  grid-template-columns: 1fr;
+}
+
+.panelsSingle {
+  grid-template-columns: 1fr;
+  max-width: 540px;
 }
 
 .panelWide {

@@ -28,6 +28,8 @@ interface ScatterPlotProps {
   splitLeftIds?: Set<number>;
   /** Point ids that fall on the "right" of the active split */
   splitRightIds?: Set<number>;
+  /** Unlabeled query point shown as grey (e.g. tutorial new leaf) */
+  queryPoint?: { x: number; y: number } | null;
   compact?: boolean;
 }
 
@@ -44,6 +46,7 @@ export function ScatterPlot({
   leafRegions,
   splitLeftIds,
   splitRightIds,
+  queryPoint,
   compact = false,
 }: ScatterPlotProps) {
   const uid = useId().replace(/:/g, "");
@@ -68,6 +71,12 @@ export function ScatterPlot({
               {CLASS_LABELS[c]}
             </span>
           ))}
+          {queryPoint ? (
+            <span className={styles.legendItem}>
+              <i style={{ background: "#9ca3af" }} />
+              New leaf
+            </span>
+          ) : null}
         </span>
       </div>
       <svg viewBox={`0 0 ${w} ${h}`} className={styles.svg} role="img">
@@ -138,6 +147,27 @@ export function ScatterPlot({
         >
           Leaf length →
         </text>
+
+        {queryPoint ? (
+          <g>
+            <circle
+              cx={toX(queryPoint.x)}
+              cy={toY(queryPoint.y)}
+              r={14}
+              className={styles.queryPulse}
+              fill="#9ca3af"
+            />
+            <circle
+              cx={toX(queryPoint.x)}
+              cy={toY(queryPoint.y)}
+              r={8}
+              fill="#9ca3af"
+              className={styles.queryDot}
+            >
+              <title>New leaf (unknown species)</title>
+            </circle>
+          </g>
+        ) : null}
 
         {samples.map((s) => {
           const highlighted = highlightIds?.has(s.id);

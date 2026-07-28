@@ -22,18 +22,24 @@ export function StageSidebar({ stage, liveNotes, onJump }: StageSidebarProps) {
       <p className={styles.summary}>{info.summary}</p>
 
       <Stack gap="sm">
-        <p className={styles.sectionLabel}>At this stage</p>
-        <ul className={styles.bullets}>
-          {info.bullets.map((b) => (
-            <li key={b}>{b}</li>
-          ))}
-        </ul>
+        {info.bullets.length > 0 ? (
+          <>
+            <p className={styles.sectionLabel}>At this stage</p>
+            <ul className={styles.bullets}>
+              {info.bullets.map((b) => (
+                <li key={b}>{b}</li>
+              ))}
+            </ul>
+          </>
+        ) : null}
       </Stack>
 
-      <div className={styles.tip}>
-        <span className={styles.tipLabel}>Friendly tip</span>
-        <p>{info.tip}</p>
-      </div>
+      {info.tip ? (
+        <div className={styles.tip}>
+          <span className={styles.tipLabel}>Tip</span>
+          <p>{info.tip}</p>
+        </div>
+      ) : null}
 
       {liveNotes.length > 0 ? (
         <div className={styles.live}>

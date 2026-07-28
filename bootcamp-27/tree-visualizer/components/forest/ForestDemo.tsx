@@ -5,22 +5,32 @@ import { EnsembleMerge } from "@/components/forest/EnsembleMerge";
 import { ScatterPlot } from "@/components/forest/ScatterPlot";
 import { StageSidebar } from "@/components/forest/StageSidebar";
 import { TrainForestOverlay } from "@/components/forest/TrainForestOverlay";
+import { TrainYourselfOverlay } from "@/components/forest/TrainYourselfOverlay";
 import { TreeView } from "@/components/forest/TreeView";
+import { TutorialCaption } from "@/components/forest/TutorialCaption";
 import { Button } from "@/components/ui/Button";
 import { Header } from "@/components/ui/Header";
 import { Slider } from "@/components/ui/Slider";
 import { Cluster, Stack } from "@/components/ui/Stack";
 import { HelpHint } from "@/components/ui/Tooltip";
-import { WalkthroughPortal } from "@/components/walkthrough/WalkthroughPortal";
 import { generateDataset } from "@/lib/forest/dataset";
-import { predictForest, trainForest } from "@/lib/forest/forest";
+import { predictForest, predictFromRoot, trainForest, USER_TREE_ID } from "@/lib/forest/forest";
 import { countNodes } from "@/lib/forest/layout";
 import { STAGE_ORDER } from "@/lib/forest/stages";
 import {
-  TOUR_STEPS,
-  readTourDismissed,
-  writeTourDismissed,
-} from "@/lib/forest/tour";
+  latestRevealedDecision,
+  revealedLeaves,
+  revealedSplits,
+} from "@/lib/forest/trainViz";
+import {
+  describeFirstSplit,
+  describeVoteStep,
+  findDissentingTreeId,
+  getTutorialStep,
+  pickTutorialQuery,
+  readTutorialDismissed,
+  writeTutorialDismissed,
+} from "@/lib/forest/tutorial";
 import {
   CLASS_LABELS,
   FEATURE_NAMES,
@@ -60,15 +70,17 @@ function describeNode(node: TreeNode): { formula: string; detail: string } {
 }
 
 export function ForestDemo() {
-  // Start closed to avoid SSR/hydration flash; open after reading localStorage.
-  const [tourOpen, setTourOpen] = useState(false);
-  const [tourStep, setTourStep] = useState(0);
   const [stage, setStage] = useState<DemoStage>("data");
   const [config, setConfig] = useState<ForestConfig>(DEFAULT_CONFIG);
   const [draft, setDraft] = useState<ForestConfig>(DEFAULT_CONFIG);
 
   const data = useMemo(() => generateDataset(42, 26), []);
   const forest = useMemo(() => trainForest(data, config), [data, config]);
+  const querySample = useMemo(() => pickTutorialQuery(forest), [forest]);
+  const dissentTreeId = useMemo(
+    () => findDissentingTreeId(forest, querySample),
+    [forest, querySample],
+  );
 
   const [focusTree, setFocusTree] = useState(0);
   const [revealNodes, setRevealNodes] = useState(0);
@@ -85,6 +97,8 @@ export function ForestDemo() {
     node: TreeNode;
   } | null>(null);
   const [trainOpen, setTrainOpen] = useState(false);
+  const [trainYourselfOpen, setTrainYourselfOpen] = useState(false);
+  const [userTree, setUserTree] = useState<TreeNode | null>(null);
   const [knobsOpen, setKnobsOpen] = useState(false);
   const [expandOrigin, setExpandOrigin] = useState<{
     top: number;
@@ -93,20 +107,38 @@ export function ForestDemo() {
     height: number;
   } | null>(null);
   const timerRef = useRef<number | null>(null);
-  const tourSeededRef = useRef(false);
   const treePanelRef = useRef<HTMLDivElement | null>(null);
+  const growStartedRef = useRef(false);
+  const trainYourselfRootRef = useRef<TreeNode | null>(null);
 
-  const tree = forest.trees[Math.min(focusTree, forest.trees.length - 1)];
+  const inTutorial = stage !== "explore";
+  const showTree = stage !== "data";
+  const showVotes = stage === "vote" || stage === "explore";
+  const showKnobs = stage === "explore";
+  const showSidebar = stage === "explore";
+  const showTreePicker =
+    stage === "vote" ||
+    stage === "explore" ||
+    stage === "predict" ||
+    (userTree != null && (stage === "grow" || stage === "predict-step"));
+  const showQueryPoint =
+    stage === "predict-step" || stage === "predict" || stage === "vote";
+
+  const focusedForestTree =
+    focusTree >= 0
+      ? forest.trees[Math.min(focusTree, forest.trees.length - 1)]
+      : null;
+  const tree =
+    focusTree === USER_TREE_ID && userTree
+      ? {
+          id: USER_TREE_ID,
+          root: userTree,
+          bagIndices: data.map((_, i) => i),
+          oobIndices: [],
+        }
+      : (focusedForestTree ?? forest.trees[0]);
   const totalNodes = tree ? countNodes(tree.root) : 0;
-
-  const bagSet = useMemo(
-    () => new Set(tree?.bagIndices.map((i) => data[i].id) ?? []),
-    [tree, data],
-  );
-  const oobSet = useMemo(
-    () => new Set(tree?.oobIndices.map((i) => data[i].id) ?? []),
-    [tree, data],
-  );
+  const viewingUserTree = focusTree === USER_TREE_ID && userTree != null;
 
   function clearTimer() {
     if (timerRef.current != null) {
@@ -118,10 +150,23 @@ export function ForestDemo() {
   useEffect(() => () => clearTimer(), []);
 
   useEffect(() => {
-    if (!readTourDismissed()) setTourOpen(true);
+    if (readTutorialDismissed()) {
+      setStage("explore");
+    } else {
+      setStage("data");
+    }
   }, []);
 
   useEffect(() => {
+    if (stage === "train-yourself") {
+      setTrainYourselfOpen(true);
+    } else if (inTutorial) {
+      setTrainYourselfOpen(false);
+    }
+  }, [stage, inTutorial]);
+
+  useEffect(() => {
+    growStartedRef.current = false;
     setFocusTree(0);
     setRevealNodes(totalNodes);
     setPathIndex(-1);
@@ -130,9 +175,35 @@ export function ForestDemo() {
     setMerging(false);
     setPlaying(false);
     clearTimer();
+
+    if (stage === "predict-step") {
+      const pred = predictForest(forest, querySample);
+      setPrediction(pred);
+      setPathIndex(0);
+    } else if (stage === "predict") {
+      runWalkThroughAnimation(querySample);
+    } else if (stage === "vote") {
+      const pred = predictForest(forest, querySample);
+      setPrediction(pred);
+      setFocusTree(dissentTreeId ?? 0);
+      runTutorialVoteAnimation(pred);
+    } else if (stage !== "explore") {
+      setPrediction(null);
+    }
   }, [stage, config]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Switching focus trees shows the full tree — growth is handled by TrainForestOverlay.
+  useEffect(() => {
+    if (
+      (stage !== "grow" && stage !== "example-tree") ||
+      !inTutorial ||
+      growStartedRef.current
+    )
+      return;
+    growStartedRef.current = true;
+    const t = window.setTimeout(() => replayGrowth(), 400);
+    return () => window.clearTimeout(t);
+  }, [stage, inTutorial, totalNodes]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     setRevealNodes(totalNodes);
   }, [focusTree, totalNodes]);
@@ -160,118 +231,85 @@ export function ForestDemo() {
     return () => window.removeEventListener("keydown", onKey);
   }, [knobsOpen]);
 
-  // Keep stage in sync with the active tour step, and seed a sample for predict/vote.
-  useEffect(() => {
-    if (!tourOpen) return;
-    const step = TOUR_STEPS[tourStep];
-    if (!step) return;
-    setStage(step.stage);
+  const pathSample =
+    stage === "explore" && selected
+      ? selected
+      : showQueryPoint
+        ? querySample
+        : null;
 
-    if (step.stage === "predict" || step.stage === "vote") {
-      if (!tourSeededRef.current) {
-        const pick =
-          data.find((s) => s.id === 7) ??
-          data[Math.floor(data.length / 2)] ??
-          data[0];
-        setSelected(pick);
-        setPrediction(null);
-        tourSeededRef.current = true;
-      }
+  const activePath = useMemo(() => {
+    if (viewingUserTree && userTree && pathSample) {
+      return predictFromRoot(userTree, pathSample).path;
     }
-  }, [tourOpen, tourStep, data]);
+    if (focusTree >= 0 && prediction) {
+      return prediction.treePredictions[focusTree]?.path ?? [];
+    }
+    return [];
+  }, [viewingUserTree, userTree, pathSample, focusTree, prediction]);
 
-  const activePath = prediction?.treePredictions[focusTree]?.path ?? [];
+  const tutorialInfo = getTutorialStep(stage);
+  const tutorialBody = useMemo(() => {
+    if (stage === "predict-step") {
+      return describeFirstSplit(querySample, forest);
+    }
+    if (stage === "vote") {
+      return describeVoteStep(forest, querySample);
+    }
+    return tutorialInfo.body;
+  }, [stage, forest, querySample, tutorialInfo.body]);
+
+  const exampleTreeRoot = forest.trees[0]?.root;
+  const exampleSplits = useMemo(() => {
+    if (stage !== "example-tree" || !exampleTreeRoot) return [];
+    return revealedSplits(exampleTreeRoot, revealNodes);
+  }, [stage, exampleTreeRoot, revealNodes]);
+
+  const exampleLeaves = useMemo(() => {
+    if (stage !== "example-tree" || !exampleTreeRoot) return [];
+    return revealedLeaves(exampleTreeRoot, revealNodes);
+  }, [stage, exampleTreeRoot, revealNodes]);
+
+  const exampleActiveSplit = useMemo(() => {
+    if (stage !== "example-tree" || !exampleTreeRoot) return null;
+    return latestRevealedDecision(exampleTreeRoot, revealNodes);
+  }, [stage, exampleTreeRoot, revealNodes]);
+
+  const { exampleSplitLeftIds, exampleSplitRightIds } = useMemo(() => {
+    if (stage !== "example-tree" || !exampleActiveSplit) {
+      return {
+        exampleSplitLeftIds: undefined as Set<number> | undefined,
+        exampleSplitRightIds: undefined as Set<number> | undefined,
+      };
+    }
+    const left = new Set<number>();
+    const right = new Set<number>();
+    const { feature, threshold, region } = exampleActiveSplit;
+    for (const s of data) {
+      const inRegion =
+        s.x >= region.x0 &&
+        s.x <= region.x1 &&
+        s.y >= region.y0 &&
+        s.y <= region.y1;
+      if (!inRegion) continue;
+      const v = feature === 0 ? s.x : s.y;
+      if (v <= threshold) left.add(s.id);
+      else right.add(s.id);
+    }
+    return { exampleSplitLeftIds: left, exampleSplitRightIds: right };
+  }, [stage, exampleActiveSplit, data]);
 
   const liveNotes = useMemo(() => {
+    if (stage !== "explore") return [];
     const notes: string[] = [];
-    switch (stage) {
-      case "data":
-        notes.push(`${data.length} labeled leaves across 3 species.`);
-        notes.push(
-          selected
-            ? `Selected #${selected.id}: ${CLASS_LABELS[selected.label]} (${selected.x.toFixed(2)}, ${selected.y.toFixed(2)}).`
-            : "Click a point when you’re curious — you’ll need one for prediction.",
-        );
-        break;
-      case "bootstrap":
-        notes.push(
-          `Tree ${focusTree + 1} bag: ${tree.bagIndices.length} draws (${Math.round(config.sampleRatio * 100)}% of data).`,
-        );
-        notes.push(
-          `Out-of-bag left aside: ${tree.oobIndices.length} points (dimmed).`,
-        );
-        break;
-      case "grow":
-        notes.push(
-          playing
-            ? `Growing tree ${focusTree + 1}… revealed ${Math.min(revealNodes, totalNodes)}/${totalNodes} nodes.`
-            : `Tree ${focusTree + 1} fully grown (${totalNodes} nodes).`,
-        );
-        notes.push(
-          "Each split picks a random feature, then the best threshold on that feature.",
-        );
-        break;
-      case "predict":
-        if (!selected) {
-          notes.push("Select a sample on the scatter plot to begin.");
-        } else if (!prediction) {
-          notes.push("Press “Walk through trees” to animate the forward pass.");
-        } else {
-          const step = activePath[pathIndex];
-          if (flow === "forward" && step?.feature !== undefined) {
-            notes.push(
-              `Forward: ${FEATURE_NAMES[step.feature]} = ${step.value?.toFixed(2)} ${step.wentLeft ? "≤" : ">"} ${step.threshold?.toFixed(2)} → go ${step.direction}.`,
-            );
-          } else if (pathIndex >= 0) {
-            const pred = prediction.treePredictions[focusTree].prediction;
-            notes.push(`Tree ${focusTree + 1} votes ${CLASS_LABELS[pred]}.`);
-          }
-          notes.push(
-            `Sample #${selected.id} true label: ${CLASS_LABELS[selected.label]}.`,
-          );
-        }
-        break;
-      case "vote":
-        if (!prediction) {
-          notes.push("Select a leaf and press “Merge votes” (or walk trees first).");
-        } else {
-          notes.push(
-            merging
-              ? `Majority: ${CLASS_LABELS[prediction.prediction]} (${Object.entries(prediction.votes)
-                  .map(([k, v]) => `${CLASS_LABELS[k as keyof typeof CLASS_LABELS]} ${v}`)
-                  .join(", ")}).`
-              : `Revealing votes… ${revealVotes}/${prediction.treePredictions.length}.`,
-          );
-          notes.push("Streams of color merge into one forest decision.");
-        }
-        break;
-      case "explore":
-        notes.push("Tweak knobs, then Rebuild forest to retrain.");
-        notes.push(
-          selected && prediction
-            ? `Current call: ${CLASS_LABELS[prediction.prediction]} for sample #${selected.id}.`
-            : "Select a point and predict anytime.",
-        );
-        break;
-    }
+    notes.push("Tweak knobs, then Rebuild forest to retrain.");
+    notes.push(
+      selected && prediction
+        ? `Current call: ${CLASS_LABELS[prediction.prediction]} for sample #${selected.id}.`
+        : "Select a point and predict anytime.",
+    );
     return notes;
-  }, [
-    stage,
-    config,
-    data.length,
-    selected,
-    focusTree,
-    tree,
-    playing,
-    revealNodes,
-    totalNodes,
-    prediction,
-    activePath,
-    pathIndex,
-    flow,
-    merging,
-    revealVotes,
-  ]);
+  }, [stage, selected, prediction]);
 
   function goStage(next: DemoStage) {
     setStage(next);
@@ -287,32 +325,44 @@ export function ForestDemo() {
     if (i > 0) setStage(STAGE_ORDER[i - 1]);
   }
 
-  function endTour() {
-    writeTourDismissed();
-    setTourOpen(false);
+  function finishTutorial() {
+    writeTutorialDismissed();
     setStage("explore");
   }
 
-  function startTour() {
-    tourSeededRef.current = false;
-    setTourStep(0);
-    setStage(TOUR_STEPS[0].stage);
-    setTourOpen(true);
+  function restartTutorial() {
+    growStartedRef.current = false;
+    setSelected(null);
+    setUserTree(null);
+    setFocusTree(0);
+    setStage("data");
   }
 
-  function handleTourNext() {
-    if (tourStep >= TOUR_STEPS.length - 1) {
-      endTour();
+  function handleTutorialNext() {
+    if (stage === "train-yourself") {
+      const root = trainYourselfRootRef.current;
+      if (root) {
+        setUserTree(root);
+        setFocusTree(USER_TREE_ID);
+      }
+      setTrainYourselfOpen(false);
+      nextStage();
       return;
     }
-    setTourStep((s) => s + 1);
+    if (stage === "vote") {
+      finishTutorial();
+      return;
+    }
+    nextStage();
   }
 
-  function handleTourBack() {
-    setTourStep((s) => Math.max(0, s - 1));
+  function handleSaveUserTree(root: TreeNode) {
+    setUserTree(root);
+    setFocusTree(USER_TREE_ID);
   }
 
   function handleSelect(sample: Sample) {
+    if (inTutorial) return;
     setSelected(sample);
     setPrediction(null);
     setPathIndex(-1);
@@ -321,9 +371,8 @@ export function ForestDemo() {
     setMerging(false);
   }
 
-  function runPredictionAnimation() {
-    if (!selected) return;
-    const pred = predictForest(forest, selected);
+  function runWalkThroughAnimation(sample: Sample) {
+    const pred = predictForest(forest, sample);
     setPrediction(pred);
     setFocusTree(0);
     setPathIndex(0);
@@ -342,7 +391,6 @@ export function ForestDemo() {
         setFlow("forward");
         return;
       }
-      // Leaf reached — that tree's vote is done; advance to the next tree.
       if (treeIdx < pred.treePredictions.length - 1) {
         treeIdx += 1;
         setFocusTree(treeIdx);
@@ -356,6 +404,26 @@ export function ForestDemo() {
       setFlow("none");
       setPathIndex(path.length - 1);
     }, 480);
+  }
+
+  function runTutorialVoteAnimation(pred: ForestPrediction) {
+    setRevealVotes(0);
+    setMerging(false);
+    clearTimer();
+    let count = 0;
+    timerRef.current = window.setInterval(() => {
+      count += 1;
+      setRevealVotes(count);
+      if (count >= pred.treePredictions.length) {
+        clearTimer();
+        setMerging(true);
+      }
+    }, 380);
+  }
+
+  function runPredictionAnimation() {
+    if (!selected) return;
+    runWalkThroughAnimation(selected);
   }
 
   function captureExpandOrigin() {
@@ -397,8 +465,17 @@ export function ForestDemo() {
     const next = { ...draft, seed: draft.seed + 1 };
     setDraft(next);
     setConfig(next);
-    setStage("grow");
     setTrainOpen(true);
+  }
+
+  function openTrainYourself() {
+    captureExpandOrigin();
+    setTrainYourselfOpen(true);
+  }
+
+  function closeTrainYourself() {
+    if (stage === "train-yourself") return;
+    setTrainYourselfOpen(false);
   }
 
   function closeTrainOverlay() {
@@ -420,7 +497,6 @@ export function ForestDemo() {
     if (!selected) return;
     const pred = prediction ?? predictForest(forest, selected);
     setPrediction(pred);
-    setStage("vote");
     setFocusTree(0);
     setRevealVotes(0);
     setMerging(false);
@@ -465,9 +541,12 @@ export function ForestDemo() {
     setMerging(false);
   }
 
-  const highlightBootstrap = stage === "bootstrap";
   const showTreePath =
-    stage === "predict" || stage === "explore" || stage === "vote";
+    stage === "predict-step" ||
+    stage === "predict" ||
+    stage === "explore" ||
+    stage === "vote";
+
   const expandMinCol = Math.max(
     240,
     Math.floor(920 / Math.min(forest.trees.length, 4)),
@@ -488,14 +567,27 @@ export function ForestDemo() {
     }, 420);
   }
 
-  const treePicker = (
-    <div className={styles.treePicker} data-tour="focus-tree">
+  const treePicker = showTreePicker ? (
+    <div className={styles.treePicker}>
+      {userTree ? (
+        <button
+          type="button"
+          className={`${styles.treePickerBtn} ${styles.treePickerBtnUser} ${viewingUserTree ? styles.treePickerBtnActive : ""}`}
+          disabled={playing || trainOpen || trainYourselfOpen}
+          onClick={() => setFocusTree(USER_TREE_ID)}
+          aria-label="Your tree"
+          aria-pressed={viewingUserTree}
+          title="Your tree"
+        >
+          You
+        </button>
+      ) : null}
       {forest.trees.map((t) => (
         <button
           key={t.id}
           type="button"
-          className={`${styles.treePickerBtn} ${focusTree === t.id ? styles.treePickerBtnActive : ""}`}
-          disabled={playing || trainOpen}
+          className={`${styles.treePickerBtn} ${focusTree === t.id ? styles.treePickerBtnActive : ""} ${dissentTreeId === t.id && stage === "vote" ? styles.treePickerBtnWrong : ""}`}
+          disabled={playing || trainOpen || trainYourselfOpen}
           onClick={() => setFocusTree(t.id)}
           aria-label={`Focus tree ${t.id + 1}`}
           aria-pressed={focusTree === t.id}
@@ -503,231 +595,258 @@ export function ForestDemo() {
           {t.id + 1}
         </button>
       ))}
-      <button
-        type="button"
-        className={styles.treePickerExpand}
-        disabled={trainOpen}
-        onClick={openForestExpand}
-        aria-label="Expand forest view"
-        title="Expand forest"
-      >
-        ↗
-      </button>
+      {stage === "explore" ? (
+        <button
+          type="button"
+          className={styles.treePickerExpand}
+          disabled={trainOpen || trainYourselfOpen}
+          onClick={openForestExpand}
+          aria-label="Expand forest view"
+          title="Expand forest"
+        >
+          ↗
+        </button>
+      ) : null}
     </div>
-  );
+  ) : null;
 
   const actionToolbar = (
     <>
-      <div data-tour="focus-tree">
-        <Cluster gap="sm">
-          <span className={styles.toolLabel}>
-            Focus tree
-            <HelpHint label="Each tree was trained on a different bootstrap bag. Flip through them to see disagreement." />
-          </span>
-          {forest.trees.map((t) => (
-            <Button
-              key={t.id}
-              size="sm"
-              variant={focusTree === t.id ? "accent" : "secondary"}
-              onClick={() => setFocusTree(t.id)}
-            >
-              {t.id + 1}
-            </Button>
-          ))}
-        </Cluster>
-      </div>
+      <Cluster gap="sm">
+        <span className={styles.toolLabel}>
+          Focus tree
+          <HelpHint label="Each tree was trained on a different bootstrap bag. Flip through them to see disagreement." />
+        </span>
+        {userTree ? (
+          <Button
+            size="sm"
+            variant={viewingUserTree ? "accent" : "secondary"}
+            onClick={() => setFocusTree(USER_TREE_ID)}
+          >
+            Your tree
+          </Button>
+        ) : null}
+        {forest.trees.map((t) => (
+          <Button
+            key={t.id}
+            size="sm"
+            variant={focusTree === t.id ? "accent" : "secondary"}
+            onClick={() => setFocusTree(t.id)}
+          >
+            {t.id + 1}
+          </Button>
+        ))}
+      </Cluster>
 
       <Cluster gap="sm">
         <Button
           size="sm"
           variant="accent"
-          disabled={playing || trainOpen}
+          disabled={playing || trainOpen || trainYourselfOpen}
           onClick={openTrainFromScratch}
         >
           Train trees from scratch
         </Button>
-        {stage === "grow" ? (
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={trainOpen}
-            onClick={replayGrowth}
-          >
-            Replay growth
-          </Button>
-        ) : null}
         <Button
           size="sm"
           variant="accent"
-          disabled={!selected || playing || trainOpen}
+          disabled={!selected || playing || trainOpen || trainYourselfOpen}
           onClick={runPredictionAnimation}
-          data-tour="walk"
         >
           Walk through trees
         </Button>
         <Button
           size="sm"
           variant="accent"
-          disabled={!selected || playing || trainOpen}
+          disabled={!selected || playing || trainOpen || trainYourselfOpen}
           onClick={runVoteAnimation}
         >
           Merge votes
+        </Button>
+        <Button
+          size="sm"
+          variant="accent"
+          disabled={playing || trainOpen || trainYourselfOpen}
+          onClick={openTrainYourself}
+        >
+          Train yourself
         </Button>
       </Cluster>
     </>
   );
 
+  const expandToolbar = actionToolbar;
+
+  const panelsClass = [
+    styles.panels,
+    showVotes ? styles.panelsVote : "",
+    stage === "data" ? styles.panelsSingle : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
     <div className={styles.app}>
-      <WalkthroughPortal
-        open={tourOpen}
-        step={tourStep}
-        onSkip={endTour}
-        onBack={handleTourBack}
-        onNext={handleTourNext}
-      />
-
       <Header
         brand="Forest Lab"
         tagline="See how a random forest actually thinks"
         actions={
-          <>
-            <Button variant="ghost" size="sm" onClick={startTour}>
-              Replay tour
+          stage === "explore" ? (
+            <Button variant="ghost" size="sm" onClick={restartTutorial}>
+              Replay tutorial
             </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={prevStage}
-              disabled={stage === STAGE_ORDER[0]}
-            >
-              Back
-            </Button>
-            <Button
-              variant="accent"
-              size="sm"
-              onClick={nextStage}
-              disabled={stage === "explore"}
-            >
-              Next step
-            </Button>
-          </>
+          ) : null
         }
       />
 
-      <div className={styles.shell}>
+      <div className={`${styles.shell} ${!showSidebar ? styles.shellFull : ""}`}>
         <main className={styles.main}>
           <section className={styles.workspace}>
-            <div className={styles.knobsShell} data-tour="knobs">
-              <button
-                type="button"
-                className={styles.knobsToggle}
-                onClick={() => setKnobsOpen((open) => !open)}
-                aria-expanded={knobsOpen}
-                aria-controls="forest-knobs-panel"
-              >
-                Forest knobs
-                <span
-                  className={`${styles.knobsToggleIcon} ${knobsOpen ? styles.knobsToggleIconOpen : ""}`}
-                  aria-hidden
+            {showKnobs ? (
+              <div className={styles.knobsShell}>
+                <button
+                  type="button"
+                  className={styles.knobsToggle}
+                  onClick={() => setKnobsOpen((open) => !open)}
+                  aria-expanded={knobsOpen}
+                  aria-controls="forest-knobs-panel"
                 >
-                  ▼
-                </span>
-              </button>
+                  Forest knobs
+                  <span
+                    className={`${styles.knobsToggleIcon} ${knobsOpen ? styles.knobsToggleIconOpen : ""}`}
+                    aria-hidden
+                  >
+                    ▼
+                  </span>
+                </button>
 
-              <div
-                id="forest-knobs-panel"
-                className={`${styles.knobsPanelWrap} ${knobsOpen ? styles.knobsPanelWrapOpen : ""}`}
-                aria-hidden={!knobsOpen}
-              >
-                <div className={styles.knobsPanelInner}>
-                  <Stack gap="md" className={styles.knobsPanel}>
-                    <Slider
-                      label="Number of trees"
-                      hint="More trees → stabler majority, slower training. Diminishing returns after a point."
-                      min={3}
-                      max={9}
-                      value={draft.nTrees}
-                      onChange={(nTrees) => setDraft((d) => ({ ...d, nTrees }))}
-                    />
-                    <Slider
-                      label="Max depth"
-                      hint="How many questions a tree may ask. Too deep → memorizes noise."
-                      min={1}
-                      max={5}
-                      value={draft.maxDepth}
-                      onChange={(maxDepth) =>
-                        setDraft((d) => ({ ...d, maxDepth }))
-                      }
-                    />
-                    <Slider
-                      label="Sample ratio"
-                      hint="Fraction of data drawn into each bootstrap bag."
-                      min={0.4}
-                      max={1}
-                      step={0.1}
-                      value={draft.sampleRatio}
-                      format={(v) => v.toFixed(1)}
-                      onChange={(sampleRatio) =>
-                        setDraft((d) => ({ ...d, sampleRatio }))
-                      }
-                    />
-                    <Button variant="accent" onClick={rebuild}>
-                      Rebuild forest
-                    </Button>
-                  </Stack>
+                <div
+                  id="forest-knobs-panel"
+                  className={`${styles.knobsPanelWrap} ${knobsOpen ? styles.knobsPanelWrapOpen : ""}`}
+                  aria-hidden={!knobsOpen}
+                >
+                  <div className={styles.knobsPanelInner}>
+                    <Stack gap="md" className={styles.knobsPanel}>
+                      <Slider
+                        label="Number of trees"
+                        hint="More trees usually means a stabler majority vote."
+                        min={3}
+                        max={9}
+                        value={draft.nTrees}
+                        onChange={(nTrees) => setDraft((d) => ({ ...d, nTrees }))}
+                      />
+                      <Slider
+                        label="Max depth"
+                        hint="How many questions a tree may ask."
+                        min={1}
+                        max={5}
+                        value={draft.maxDepth}
+                        onChange={(maxDepth) =>
+                          setDraft((d) => ({ ...d, maxDepth }))
+                        }
+                      />
+                      <Slider
+                        label="Sample ratio"
+                        hint="Fraction of data drawn into each bootstrap bag."
+                        min={0.4}
+                        max={1}
+                        step={0.1}
+                        value={draft.sampleRatio}
+                        format={(v) => v.toFixed(1)}
+                        onChange={(sampleRatio) =>
+                          setDraft((d) => ({ ...d, sampleRatio }))
+                        }
+                      />
+                      <Button variant="accent" onClick={rebuild}>
+                        Rebuild forest
+                      </Button>
+                    </Stack>
+                  </div>
                 </div>
               </div>
-            </div>
+            ) : null}
 
-            <div className={`${styles.panels} ${styles.panelsVote}`}>
-              <div className={styles.panel} data-tour="scatter">
+            <div className={panelsClass}>
+              <div className={styles.panel}>
                 <ScatterPlot
                   samples={data}
-                  highlightIds={highlightBootstrap ? bagSet : undefined}
-                  dimIds={highlightBootstrap ? oobSet : undefined}
-                  selectedId={selected?.id ?? null}
+                  selectedId={inTutorial ? null : selected?.id ?? null}
                   pulseId={
-                    stage === "predict" || stage === "vote"
-                      ? selected?.id ?? null
+                    stage === "explore" && selected ? selected.id : null
+                  }
+                  queryPoint={
+                    showQueryPoint
+                      ? { x: querySample.x, y: querySample.y }
                       : null
                   }
-                  onSelect={handleSelect}
-                  title={
-                    highlightBootstrap
-                      ? `Bootstrap bag · Tree ${focusTree + 1}`
-                      : "Leaf feature space"
+                  splits={stage === "example-tree" ? exampleSplits : undefined}
+                  activeSplitId={
+                    stage === "example-tree"
+                      ? exampleActiveSplit?.nodeId ?? null
+                      : undefined
                   }
+                  leafRegions={
+                    stage === "example-tree" ? exampleLeaves : undefined
+                  }
+                  splitLeftIds={exampleSplitLeftIds}
+                  splitRightIds={exampleSplitRightIds}
+                  onSelect={inTutorial ? undefined : handleSelect}
+                  title="Leaf feature space"
                 />
               </div>
 
-              <div
-                className={`${styles.panel} ${styles.treePanel}`}
-                data-tour="tree"
-                ref={treePanelRef}
-              >
-                <TreeView
-                  root={tree.root}
-                  title={`Tree ${focusTree + 1}`}
-                  revealCount={stage === "grow" ? revealNodes : undefined}
-                  activePath={showTreePath ? activePath : []}
-                  pathIndex={showTreePath ? pathIndex : -1}
-                  flow={showTreePath ? flow : "none"}
-                />
-                {treePicker}
-              </div>
+              {showTree ? (
+                <div
+                  className={`${styles.panel} ${styles.treePanel}`}
+                  ref={treePanelRef}
+                >
+                  <TreeView
+                    root={tree.root}
+                    title={viewingUserTree ? "Your tree" : `Tree ${focusTree + 1}`}
+                    revealCount={
+                      (stage === "grow" || stage === "example-tree") &&
+                      !viewingUserTree
+                        ? revealNodes
+                        : undefined
+                    }
+                    activePath={showTreePath ? activePath : []}
+                    pathIndex={showTreePath ? pathIndex : -1}
+                    flow={showTreePath ? flow : "none"}
+                  />
+                  {treePicker}
+                </div>
+              ) : null}
 
-              <div
-                className={`${styles.panel} ${styles.panelWide}`}
-                data-tour="votes"
-              >
-                <EnsembleMerge
-                  prediction={prediction}
-                  revealVotes={revealVotes}
-                  merging={merging}
-                />
-              </div>
+              {showVotes ? (
+                <div className={`${styles.panel} ${styles.panelWide}`}>
+                  <EnsembleMerge
+                    prediction={prediction}
+                    revealVotes={revealVotes}
+                    merging={merging}
+                    hideTrueLabel={inTutorial && stage === "vote"}
+                    highlightTreeId={
+                      stage === "vote" ? dissentTreeId : null
+                    }
+                  />
+                </div>
+              ) : null}
             </div>
+
+            {inTutorial ? (
+              <TutorialCaption
+                stage={stage}
+                title={tutorialInfo.title}
+                body={tutorialBody}
+                docked={stage === "train-yourself"}
+                onBack={prevStage}
+                onNext={handleTutorialNext}
+                onSkip={finishTutorial}
+              />
+            ) : null}
+
+            {stage === "explore" ? (
+              <div className={styles.toolbar}>{actionToolbar}</div>
+            ) : null}
 
             {forestExpanded ? (
               <div
@@ -753,13 +872,16 @@ export function ForestDemo() {
                       Close
                     </Button>
                   </div>
-                  <div className={styles.expandToolbar}>{actionToolbar}</div>
+                  <div className={styles.expandToolbar}>{expandToolbar}</div>
                   {expandedNode ? (() => {
                     const { formula, detail } = describeNode(expandedNode.node);
                     return (
                       <div className={styles.nodeDetail} aria-live="polite">
                         <p className={styles.nodeDetailEyebrow}>
-                          Tree {expandedNode.treeId + 1} ·{" "}
+                          {expandedNode.treeId === USER_TREE_ID
+                            ? "Your tree"
+                            : `Tree ${expandedNode.treeId + 1}`}{" "}
+                          ·{" "}
                           {expandedNode.node.kind === "leaf"
                             ? "Leaf"
                             : "Split rule"}
@@ -779,6 +901,41 @@ export function ForestDemo() {
                       gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${expandMinCol}px), 1fr))`,
                     }}
                   >
+                    {userTree ? (
+                      <div
+                        key="user-tree"
+                        className={`${styles.expandCard} ${viewingUserTree ? styles.expandCardActive : ""}`}
+                      >
+                        <TreeView
+                          root={userTree}
+                          title={`Your tree${
+                            pathSample
+                              ? ` · ${CLASS_LABELS[predictFromRoot(userTree, pathSample).prediction]}`
+                              : ""
+                          }`}
+                          compact
+                          selectedNodeId={
+                            expandedNode?.treeId === USER_TREE_ID
+                              ? expandedNode.node.id
+                              : null
+                          }
+                          onNodeClick={(node) =>
+                            setExpandedNode({ treeId: USER_TREE_ID, node })
+                          }
+                          activePath={
+                            viewingUserTree && activePath.length > 0
+                              ? activePath
+                              : []
+                          }
+                          pathIndex={
+                            viewingUserTree && activePath.length > 0
+                              ? activePath.length - 1
+                              : -1
+                          }
+                          flow="none"
+                        />
+                      </div>
+                    ) : null}
                     {forest.trees.map((t) => {
                       const treePath =
                         prediction?.treePredictions[t.id]?.path ?? [];
@@ -790,7 +947,8 @@ export function ForestDemo() {
                         canShowPath &&
                         (flow === "none"
                           ? true
-                          : t.id < focusTree || (isAnimating && pathIndex >= 0));
+                          : t.id < focusTree ||
+                            (isAnimating && pathIndex >= 0));
                       const showLive = canShowPath && isAnimating;
                       const showDone =
                         walkedThrough && !showLive && treePath.length > 0;
@@ -835,6 +993,18 @@ export function ForestDemo() {
               </div>
             ) : null}
 
+            <TrainYourselfOverlay
+              open={trainYourselfOpen}
+              data={data}
+              originStyle={expandStyle}
+              tutorialMode={stage === "train-yourself"}
+              onClose={closeTrainYourself}
+              onSave={handleSaveUserTree}
+              onRootChange={(root) => {
+                trainYourselfRootRef.current = root;
+              }}
+            />
+
             <TrainForestOverlay
               open={trainOpen}
               forest={forest}
@@ -842,11 +1012,12 @@ export function ForestDemo() {
               originStyle={expandStyle}
               onClose={closeTrainOverlay}
             />
-
           </section>
         </main>
 
-        <StageSidebar stage={stage} liveNotes={liveNotes} onJump={goStage} />
+        {showSidebar ? (
+          <StageSidebar stage={stage} liveNotes={liveNotes} onJump={goStage} />
+        ) : null}
       </div>
     </div>
   );

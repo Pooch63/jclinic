@@ -71,8 +71,10 @@ export interface ForestPrediction {
 
 export type DemoStage =
   | "data"
-  | "bootstrap"
+  | "example-tree"
+  | "train-yourself"
   | "grow"
+  | "predict-step"
   | "predict"
   | "vote"
   | "explore";

@@ -1,0 +1,55 @@
+.interactiveSvg {
+  cursor: crosshair;
+  user-select: none;
+}
+
+.regionSelected {
+  opacity: 0.22 !important;
+}
+
+.regionHovered {
+  opacity: 0.26 !important;
+}
+
+.selectionOutline {
+  fill: none;
+  stroke: var(--color-sun);
+  stroke-width: 2.5;
+  stroke-dasharray: 6 4;
+  pointer-events: none;
+  animation: pulseOutline 1.6s ease-in-out infinite;
+}
+
+.hint {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--color-ink-muted);
+}
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.1rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: 0.28rem;
+  border: 1px solid rgba(45, 106, 79, 0.22);
+  background: rgba(255, 255, 255, 0.85);
+  font-family: var(--font-body);
+  font-size: 0.65rem;
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--color-ink-muted);
+  vertical-align: middle;
+}
+
+@keyframes pulseOutline {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}

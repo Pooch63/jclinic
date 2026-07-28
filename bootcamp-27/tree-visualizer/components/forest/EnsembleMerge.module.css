@@ -71,6 +71,11 @@
   transform: translateX(0);
 }
 
+.voterWrong {
+  border-color: rgba(217, 119, 6, 0.45);
+  background: rgba(217, 119, 6, 0.06);
+}
+
 .voterLabel {
   font-size: 0.75rem;
   font-weight: 700;

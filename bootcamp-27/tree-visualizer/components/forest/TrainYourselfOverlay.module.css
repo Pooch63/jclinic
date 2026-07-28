@@ -1,0 +1,198 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  display: flex;
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 1rem;
+  background: rgba(28, 48, 36, 0.42);
+  backdrop-filter: blur(8px);
+  transform-origin: var(--origin-x, 50%) var(--origin-y, 40%);
+  animation: expandOut 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.overlayTutorial {
+  padding-bottom: 9.5rem;
+}
+
+.surface {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.15rem 1.25rem 1.35rem;
+  border-radius: 1.25rem;
+  background:
+    radial-gradient(ellipse 80% 50% at 15% 0%, rgba(149, 213, 178, 0.4), transparent 55%),
+    radial-gradient(ellipse 55% 40% at 95% 8%, rgba(2, 132, 199, 0.12), transparent 50%),
+    rgba(247, 250, 247, 0.97);
+  border: 1px solid rgba(45, 106, 79, 0.14);
+  box-shadow: 0 24px 60px rgba(28, 48, 36, 0.24);
+  overflow: auto;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-shrink: 0;
+}
+
+.eyebrow {
+  margin: 0 0 0.2rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+}
+
+.title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(1.35rem, 2.5vw, 1.85rem);
+  font-weight: 650;
+  color: var(--color-ink);
+}
+
+.status {
+  margin: 0.45rem 0 0;
+  max-width: 52rem;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  color: var(--color-ink-muted);
+}
+
+.headerActions {
+  display: flex;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.65);
+  border: 1px solid rgba(45, 106, 79, 0.12);
+  flex-shrink: 0;
+}
+
+.controlLabel {
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--color-ink-muted);
+  align-self: center;
+}
+
+.kbd,
+.kbdInline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.15rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 0.3rem;
+  border: 1px solid rgba(45, 106, 79, 0.22);
+  background: rgba(255, 255, 255, 0.85);
+  font-family: var(--font-body);
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1.2;
+  color: var(--color-ink-muted);
+  box-shadow: 0 1px 0 rgba(45, 106, 79, 0.12);
+}
+
+.kbd {
+  margin-left: 0.35rem;
+}
+
+.shortcutHint {
+  font-size: 0.78rem;
+  color: var(--color-ink-muted);
+  align-self: center;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  gap: 1.1rem;
+  align-items: start;
+}
+
+.scatterPane {
+  padding: 0.85rem;
+  border-radius: 1.1rem;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(45, 106, 79, 0.12);
+  animation: floatIn 420ms ease both;
+}
+
+.treePane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 0.85rem;
+  border-radius: 1.1rem;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(45, 106, 79, 0.12);
+}
+
+.selectionDetail {
+  padding: 0.65rem 0.85rem;
+  border-radius: 0.85rem;
+  background: rgba(255, 248, 235, 0.9);
+  border: 1px solid rgba(217, 119, 6, 0.25);
+}
+
+.selectionEyebrow {
+  margin: 0 0 0.2rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+}
+
+.selectionMeta {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--color-ink);
+}
+
+@keyframes expandOut {
+  from {
+    transform: scale(0.22);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes floatIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 960px) {
+  .body {
+    grid-template-columns: 1fr;
+  }
+}
