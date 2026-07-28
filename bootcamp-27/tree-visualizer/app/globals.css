@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+:root {
+  --background: #e8f0ea;
+  --foreground: #1c3024;
+  --color-paper: #f7faf7;
+  --color-ink: #1c3024;
+  --color-ink-muted: #4a6354;
+  --color-moss: #2d6a4f;
+  --color-canopy: #1b4332;
+  --color-sun: #d97706;
+  --color-sky: #0284c7;
+  --font-display: var(--font-fraunces), "Georgia", serif;
+  --font-body: var(--font-nunito), "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-mono);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  color: var(--color-ink);
+  font-family: var(--font-body);
+  background:
+    radial-gradient(ellipse 90% 60% at 10% -10%, rgba(149, 213, 178, 0.55), transparent 55%),
+    radial-gradient(ellipse 70% 50% at 95% 10%, rgba(168, 218, 220, 0.45), transparent 50%),
+    radial-gradient(ellipse 60% 40% at 50% 100%, rgba(217, 119, 6, 0.08), transparent 55%),
+    linear-gradient(180deg, #eef5ef 0%, #e2ebe4 100%);
+  background-attachment: fixed;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.35;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160' viewBox='0 0 160 160'%3E%3Cpath fill='none' stroke='%232d6a4f' stroke-opacity='0.07' d='M0 80h160M80 0v160'/%3E%3C/svg%3E");
+  z-index: -1;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(45, 106, 79, 0.22);
+}

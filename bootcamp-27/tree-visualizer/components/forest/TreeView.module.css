@@ -1,0 +1,149 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  width: 100%;
+}
+
+.caption {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--color-ink-muted);
+}
+
+.flowBadge {
+  padding: 0.2rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(217, 119, 6, 0.12);
+  color: #b45309;
+  font-size: 0.75rem;
+  font-weight: 700;
+  animation: badgePulse 1.2s ease infinite;
+}
+
+.svg {
+  width: 100%;
+  height: auto;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 1rem;
+  border: 1px solid rgba(45, 106, 79, 0.12);
+  overflow: visible;
+}
+
+.edge {
+  stroke: rgba(45, 106, 79, 0.28);
+  stroke-width: 2;
+  transition: stroke 200ms ease, stroke-width 200ms ease;
+}
+
+.edgeActive {
+  stroke: var(--color-sun);
+  stroke-width: 3.5;
+}
+
+.decision {
+  stroke: rgba(45, 106, 79, 0.35);
+  stroke-width: 2;
+  transition: fill 200ms ease, filter 200ms ease;
+}
+
+.leaf {
+  stroke: rgba(255, 255, 255, 0.5);
+  stroke-width: 1.5;
+}
+
+.onPath {
+  filter: drop-shadow(0 0 8px rgba(217, 119, 6, 0.45));
+}
+
+.current {
+  animation: pop 420ms ease;
+}
+
+.label {
+  font-size: 9px;
+  font-family: var(--font-body);
+  font-weight: 700;
+  fill: var(--color-ink);
+  pointer-events: none;
+}
+
+.labelLight {
+  fill: white;
+}
+
+.sub {
+  font-size: 9px;
+  fill: var(--color-ink-muted);
+  font-family: var(--font-body);
+}
+
+.particle {
+  filter: drop-shadow(0 0 6px rgba(217, 119, 6, 0.8));
+}
+
+.node {
+  animation: growIn 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.interactive {
+  cursor: pointer;
+}
+
+.interactive:focus-visible {
+  outline: none;
+}
+
+.interactive:focus-visible .decision,
+.interactive:focus-visible .leaf {
+  stroke: var(--color-sun);
+  stroke-width: 2.5;
+}
+
+.hitTarget {
+  pointer-events: all;
+}
+
+.selected .decision,
+.selected .leaf {
+  stroke: var(--color-sun);
+  stroke-width: 3;
+  filter: drop-shadow(0 0 6px rgba(217, 119, 6, 0.5));
+}
+
+@keyframes growIn {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes pop {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes badgePulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}

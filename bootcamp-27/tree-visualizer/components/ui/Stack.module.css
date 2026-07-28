@@ -1,0 +1,42 @@
+.stack {
+  display: flex;
+  flex-direction: column;
+}
+
+.xs {
+  gap: 0.35rem;
+}
+
+.sm {
+  gap: 0.6rem;
+}
+
+.md {
+  gap: 1rem;
+}
+
+.lg {
+  gap: 1.5rem;
+}
+
+.xl {
+  gap: 2.25rem;
+}
+
+.cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.c-xs {
+  gap: 0.35rem;
+}
+
+.c-sm {
+  gap: 0.55rem;
+}
+
+.c-md {
+  gap: 0.85rem;
+}
